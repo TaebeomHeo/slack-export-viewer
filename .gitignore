@@ -67,6 +67,10 @@ target/
 # IDE
 .idea
 .vscode
+.history/
 
 # Environments
 venv/
+
+# Slack Data
+slack_data/
