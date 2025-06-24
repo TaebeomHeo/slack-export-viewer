@@ -42,6 +42,12 @@ class Config(object):
         self.output_dir = config.get("output_dir")
         self.port = config.get("port")
         self.test = config.get("test")
+        
+        # 외부 리소스 다운로드 옵션
+        self.download_external = config.get("download_external")
+        
+        # Slack 토큰 (Bearer 인증용)
+        self.slack_token = config.get("slack_token")
 
         self.sanity_check()
 

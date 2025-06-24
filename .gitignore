@@ -80,3 +80,4 @@ slack-data/
 */node_modules/
 node_src/node_modules/
 node_src/secret_id.txt
+html_output/

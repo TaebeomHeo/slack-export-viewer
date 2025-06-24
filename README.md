@@ -77,6 +77,10 @@ Options:
                                   Environment var: SEV_SKIP_CHANNEL_MEMBER_CHANGE (default: false)
   --hide-channels TEXT            Comma separated list of channels to hide.
                                   Environment var: SEV_HIDE_CHANNELS (default: None)
+  --download-external             Download external resources (images, attachments) to local directory for offline viewing.
+                                  Environment var: SEV_DOWNLOAD_EXTERNAL (default: false)
+  --slack-token TEXT              Slack Bearer token for downloading authenticated resources (xoxb-...).
+                                  Environment var: SEV_SLACK_TOKEN (default: None)
   --help                          Show this message and exit.
 ```
 
@@ -107,6 +111,52 @@ slack-export-viewer -z /path/to/export/zip
 ```
 
 If everything went well, your archive will have been extracted and processed, and a browser window will have opened showing your _#general_ channel from the export. Or, if the `html-only` flag was set, HTML files will be available in the `html-output` directory (or a different directory if specified).
+
+### 3) Offline viewing with external resources
+
+To create a completely offline version with all external resources (images, attachments) downloaded locally:
+
+```bash
+slack-export-viewer -z /path/to/export/zip --html-only --download-external
+```
+
+This will:
+
+- Download all external images and attachments to `html_output/external_resources/`
+- Generate HTML files that reference the local copies
+- Create a completely self-contained archive that works offline
+- Prevent duplicate downloads by using URL hashing
+- Handle file naming conflicts automatically
+
+The downloaded files are organized with safe filenames and include the original file extensions.
+
+#### Using Slack token for authenticated resources
+
+Some Slack resources (like user profile images and file attachments) require authentication. To download these resources, you'll need a Slack Bearer token:
+
+```bash
+slack-export-viewer -z /path/to/export/zip --html-only --download-external --slack-token xoxb-your-token-here
+```
+
+**Automatic Token Extraction**: The tool can automatically extract tokens from Slack URLs (like `t=xoxe-...` or `t=xoxb-...` parameters) and use them for authentication. This means you might not need to provide a separate token if the URLs in your export already contain valid tokens.
+
+To get a Slack token (if automatic extraction doesn't work):
+
+1. Go to https://api.slack.com/apps
+2. Create a new app or select an existing one
+3. Go to "OAuth & Permissions"
+4. Add the following scopes:
+   - `files:read` - to download file attachments
+   - `users:read` - to access user profile information
+5. Install the app to your workspace
+6. Copy the "Bot User OAuth Token" (starts with `xoxb-`)
+
+You can also set the token as an environment variable:
+
+```bash
+export SEV_SLACK_TOKEN=xoxb-your-token-here
+slack-export-viewer -z /path/to/export/zip --html-only --download-external
+```
 
 ## CLI
 

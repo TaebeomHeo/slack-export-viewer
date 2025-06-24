@@ -19,10 +19,11 @@ class Reader(object):
     Reader object will read all of the archives' data from the json files
     """
 
-    def __init__(self, config):
+    def __init__(self, config, downloader=None):
         self._config = config
         self._PATH = extract_archive(config.archive)
         self._since = config.since
+        self._downloader = downloader
 
         # keep list of all channels to hide to flag not found ones
         self._remaining_unhidden_channels = config.hide_channels.copy()
@@ -225,7 +226,7 @@ class Reader(object):
                     day_messages.sort(key=Reader._extract_time)
 
                     c_id = channel_name_to_id[name]
-                    messages.extend([Message(formatter, d, c_id, self._slack_name) for d in day_messages])
+                    messages.extend([Message(formatter, d, c_id, self._slack_name, self._downloader) for d in day_messages])
 
             chats[name] = messages
         chats = self._build_threads(chats)

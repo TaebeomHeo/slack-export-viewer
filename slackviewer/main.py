@@ -8,9 +8,10 @@ from slackviewer.app import app
 from slackviewer.config import Config
 from slackviewer.freezer import CustomFreezer
 from slackviewer.reader import Reader
+from slackviewer.utils.downloader import ExternalResourceDownloader
 
 
-def configure_app(app, config):
+def configure_app(app, config, downloader=None):
     app.debug = config.debug
     app.no_sidebar = config.no_sidebar
     app.no_external_references = config.no_external_references
@@ -18,7 +19,7 @@ def configure_app(app, config):
         print("WARNING: DEBUG MODE IS ENABLED!")
     app.config["PROPAGATE_EXCEPTIONS"] = True
 
-    reader = Reader(config)
+    reader = Reader(config, downloader)
 
     top = flask._app_ctx_stack
     top.path = reader.archive_path()
@@ -40,6 +41,36 @@ def configure_app(app, config):
     # since the application loads the first
     top.channels = {k: v for k, v in top.channels.items() if v}
     top.groups = {k: v for k, v in top.groups.items() if v}
+    
+    # 외부 리소스 다운로드 (download_external 옵션이 활성화된 경우)
+    if downloader and config.download_external:
+        print("외부 리소스를 다운로드하는 중...")
+        all_messages = []
+        
+        print(f"채널 메시지 수집 중... (총 {len(top.channels)}개 채널)")
+        for channel_name, messages in top.channels.items():
+            print(f"  채널 '{channel_name}': {len(messages)}개 메시지")
+            all_messages.extend(messages)
+        
+        print(f"그룹 메시지 수집 중... (총 {len(top.groups)}개 그룹)")
+        for group_name, messages in top.groups.items():
+            print(f"  그룹 '{group_name}': {len(messages)}개 메시지")
+            all_messages.extend(messages)
+        
+        print(f"DM 메시지 수집 중... (총 {len(top.dms)}개 DM)")
+        for dm_name, messages in top.dms.items():
+            print(f"  DM '{dm_name}': {len(messages)}개 메시지")
+            all_messages.extend(messages)
+        
+        print(f"MPIM 메시지 수집 중... (총 {len(top.mpims)}개 MPIM)")
+        for mpim_name, messages in top.mpims.items():
+            print(f"  MPIM '{mpim_name}': {len(messages)}개 메시지")
+            all_messages.extend(messages)
+        
+        print(f"총 {len(all_messages)}개 메시지에서 외부 리소스 검색 시작...")
+        
+        downloaded, total = downloader.download_all_resources(all_messages)
+        print(f"다운로드 완료: {downloaded}/{total} 개의 외부 리소스")
 
 
 @click.command()
@@ -108,12 +139,33 @@ def configure_app(app, config):
     Comma separated list of channels to hide.
     Environment var: SEV_HIDE_CHANNELS (default: None)
     """)
+@click.option("--download-external", is_flag=True, default=False, envvar='SEV_DOWNLOAD_EXTERNAL', help="""\b
+    Download external resources (images, attachments) to local directory for offline viewing.
+    Environment var: SEV_DOWNLOAD_EXTERNAL (default: false)
+    """)
+@click.option("--slack-token", type=click.STRING, default=None, envvar='SEV_SLACK_TOKEN', help="""\b
+    Slack Bearer token for downloading authenticated resources (xoxb-...).
+    Environment var: SEV_SLACK_TOKEN (default: None)
+    """)
 def main(**kwargs):
     config = Config(kwargs)
     if not config.archive:
         raise ValueError("Empty path provided for archive")
 
-    configure_app(app, config)
+    # 다운로더 초기화 (download_external 옵션이 활성화된 경우)
+    downloader = None
+    if config.download_external:
+        if not config.html_only:
+            print("WARNING: --download-external is only supported with --html-only mode")
+        else:
+            downloader = ExternalResourceDownloader(config.output_dir, slack_token=config.slack_token)
+            print(f"외부 리소스 다운로더가 초기화되었습니다. 저장 위치: {downloader.download_dir}")
+            if config.slack_token:
+                print("Slack 토큰이 설정되어 인증된 리소스 다운로드를 시도합니다.")
+            else:
+                print("WARNING: Slack 토큰이 설정되지 않아 인증이 필요한 리소스는 다운로드되지 않을 수 있습니다.")
+
+    configure_app(app, config, downloader)
 
     if config.html_only:
         # We need relative URLs, otherwise channel refs do not work

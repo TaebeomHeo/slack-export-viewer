@@ -9,7 +9,7 @@ class Message(object):
 
     _DEFAULT_USER_ICON_SIZE = 72
 
-    def __init__(self, formatter, message, channel_id, slack_name):
+    def __init__(self, formatter, message, channel_id, slack_name, downloader=None):
         self._formatter = formatter
         self._message = message
         # default is False, we update it later if its a thread message
@@ -20,6 +20,8 @@ class Message(object):
         self.channel_id = channel_id
         # slack name that is in the url https://<slackname>.slack.com
         self.slack_name = slack_name
+        # 다운로더 인스턴스
+        self._downloader = downloader
 
     def __repr__(self):
         message = self._message.get("text")
@@ -73,7 +75,7 @@ class Message(object):
 
     @property
     def attachments(self):
-        return [ LinkAttachment("ATTACHMENT", entry, self._formatter)
+        return [ LinkAttachment("ATTACHMENT", entry, self._formatter, self._downloader)
             for entry in self._message.get("attachments", []) ]
 
     @property
@@ -82,7 +84,7 @@ class Message(object):
             allfiles = [self._message["file"]]
         else:
             allfiles = self._message.get("files", [])
-        return [ LinkAttachment("FILE", entry, self._formatter) for entry in allfiles ]
+        return [ LinkAttachment("FILE", entry, self._formatter, self._downloader) for entry in allfiles ]
 
     @property
     def msg(self):
@@ -312,7 +314,13 @@ class Message(object):
     @property
     def img(self):
         try:
-            return self.user.image_url(self._DEFAULT_USER_ICON_SIZE)
+            original_url = self.user.image_url(self._DEFAULT_USER_ICON_SIZE)
+            if self._downloader and original_url:
+                # 다운로더가 있으면 로컬 경로로 변환 시도
+                local_path = self._downloader.get_local_path(original_url)
+                if local_path:
+                    return local_path
+            return original_url
         except KeyError:
             return ""
 
@@ -342,10 +350,11 @@ class LinkAttachment():
     # Fields that need to be processed for markup (and possibly markdown)
     _TEXT_FIELDS = {"pretext", "text", "footer"}
 
-    def __init__(self, attachment_type, raw, formatter):
+    def __init__(self, attachment_type, raw, formatter, downloader=None):
         self._type = attachment_type
         self._raw = raw
         self._formatter = formatter
+        self._downloader = downloader
 
     def __getitem__(self, key):
         content = self._raw[key]
@@ -359,8 +368,18 @@ class LinkAttachment():
         # ATTACHMENT type
         if "image_url" in self._raw:
             logging.debug("image_url path")
+            original_url = self._raw["image_url"]
+            if self._downloader:
+                # 다운로더가 있으면 로컬 경로로 변환 시도
+                local_path = self._downloader.get_local_path(original_url)
+                if local_path:
+                    return {
+                        "src": local_path,
+                        "width": self._raw.get("image_width"),
+                        "height": self._raw.get("image_height"),
+                    }
             return {
-                "src": self._raw["image_url"],
+                "src": original_url,
                 "width": self._raw.get("image_width"),
                 "height": self._raw.get("image_height"),
             }
@@ -379,8 +398,18 @@ class LinkAttachment():
                         logging.info("Fell back to thumbnail key %s for [%s]",
                             thumb_key, self._raw.get("title"))
             if thumb_key in self._raw:
+                original_url = self._raw[thumb_key]
+                if self._downloader:
+                    # 다운로더가 있으면 로컬 경로로 변환 시도
+                    local_path = self._downloader.get_local_path(original_url)
+                    if local_path:
+                        return {
+                            "src": local_path,
+                            "width": self._raw.get(thumb_key + "_w"),
+                            "height": self._raw.get(thumb_key + "_h"),
+                        }
                 return {
-                    "src": self._raw[thumb_key],
+                    "src": original_url,
                     "width": self._raw.get(thumb_key + "_w"),
                     "height": self._raw.get(thumb_key + "_h"),
                 }
@@ -396,6 +425,21 @@ class LinkAttachment():
         if "from_url" in self._raw:
             return self._raw["from_url"]
         else:
+            return self._raw.get("url_private")
+
+    @property
+    def download_url(self):
+        """
+        파일 다운로드에 적합한 URL을 반환합니다.
+        url_private_download이 있으면 사용하고, 없으면 url_private를 사용합니다.
+        """
+        if "from_url" in self._raw:
+            return self._raw["from_url"]
+        else:
+            # url_private_download가 있으면 우선 사용 (다운로드에 더 적합)
+            download_url = self._raw.get("url_private_download")
+            if download_url:
+                return download_url
             return self._raw.get("url_private")
 
     @property
