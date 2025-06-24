@@ -73,4 +73,6 @@ target/
 venv/
 
 # Slack Data
-slack_data/
+slack-data/
+*/node_modules/
+node_src/node_modules/
