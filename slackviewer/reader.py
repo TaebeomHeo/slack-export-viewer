@@ -222,6 +222,11 @@ class Reader(object):
                     # loads all messages
                     day_messages = json.load(f)
 
+                    # Check if day_messages is a list, if not, skip this file
+                    if not isinstance(day_messages, list):
+                        logging.warning(f"Skipping {day}: expected list but got {type(day_messages)}")
+                        continue
+
                     # sorts the messages in the json file
                     day_messages.sort(key=Reader._extract_time)
 

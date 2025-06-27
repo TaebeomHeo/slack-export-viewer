@@ -76,7 +76,7 @@ venv/
 .env
 
 # Slack Data
-slack-data/
+slack_data/
 */node_modules/
 node_src/node_modules/
 node_src/secret_id.txt
