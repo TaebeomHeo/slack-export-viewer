@@ -183,6 +183,36 @@ def main(**kwargs):
 
         freezer.freeze()
 
+        # HTML 생성 후 외부 링크를 로컬 경로로 수정
+        if downloader:
+            print("🔗 HTML 파일에서 외부 링크를 로컬 경로로 수정 중...")
+            import glob
+            import os
+            
+            # 모든 HTML 파일 찾기
+            html_files = glob.glob(os.path.join(config.output_dir, "**/*.html"), recursive=True)
+            
+            for html_file in html_files:
+                try:
+                    with open(html_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # 링크 수정 (HTML 파일 경로 전달)
+                    modified_content = downloader.replace_all_slack_links_in_html(content, html_file)
+                    
+                    # 변경사항이 있으면 파일에 저장
+                    if modified_content != content:
+                        with open(html_file, 'w', encoding='utf-8') as f:
+                            f.write(modified_content)
+                        print(f"  ✅ {os.path.relpath(html_file, config.output_dir)} - 링크 수정 완료")
+                    else:
+                        print(f"  ⏭️  {os.path.relpath(html_file, config.output_dir)} - 수정할 링크 없음")
+                        
+                except Exception as e:
+                    print(f"  ❌ {os.path.relpath(html_file, config.output_dir)} - 링크 수정 실패: {e}")
+            
+            print("🔗 모든 HTML 파일의 링크 수정이 완료되었습니다!")
+
         if not config.no_browser:
             webbrowser.open("file:///{}/index.html"
                             .format(os.path.abspath(config.output_dir)))

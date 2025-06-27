@@ -17,7 +17,31 @@ class ExternalResourceDownloader:
     def __init__(self, output_dir, download_dir="external_resources", slack_token=None):
         self.output_dir = Path(output_dir)
         self.download_dir = self.output_dir / download_dir
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"🔧 다운로더 초기화 시작")
+        print(f"  📁 출력 디렉토리: {self.output_dir.absolute()}")
+        print(f"  📁 다운로드 디렉토리: {self.download_dir.absolute()}")
+        logging.info(f"🔧 다운로더 초기화 시작")
+        logging.info(f"  📁 출력 디렉토리: {self.output_dir.absolute()}")
+        logging.info(f"  📁 다운로드 디렉토리: {self.download_dir.absolute()}")
+        
+        # 디렉토리 생성
+        try:
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+            print(f"  ✅ 디렉토리 생성 완료: {self.download_dir.exists()}")
+            logging.info(f"  ✅ 디렉토리 생성 완료: {self.download_dir.exists()}")
+            
+            # 쓰기 권한 확인
+            if os.access(self.download_dir, os.W_OK):
+                print(f"  ✅ 쓰기 권한 확인됨")
+                logging.info(f"  ✅ 쓰기 권한 확인됨")
+            else:
+                print(f"  ❌ 쓰기 권한 없음!")
+                logging.error(f"  ❌ 쓰기 권한 없음!")
+                
+        except Exception as e:
+            print(f"  ❌ 디렉토리 생성 실패: {str(e)}")
+            logging.error(f"  ❌ 디렉토리 생성 실패: {str(e)}")
         
         # Slack 토큰 (Bearer 인증용)
         self.slack_token = slack_token
@@ -27,6 +51,9 @@ class ExternalResourceDownloader:
         
         # 중복 다운로드 방지를 위한 캐시
         self.download_cache = {}
+        
+        # 원본 파일명과 다운로드된 파일명의 매핑 (원본 파일명 -> 다운로드된 파일명)
+        self.original_filename_mapping = {}
         
         # 세션 재사용으로 성능 향상
         self.session = requests.Session()
@@ -52,7 +79,11 @@ class ExternalResourceDownloader:
         # 기존 다운로드된 파일들을 캐시에 로드
         self._load_existing_files()
         
+        # 기존 파일들에서 원본 파일명 매핑 재구성
+        self._reconstruct_original_filenames()
+        
         logging.info(f"외부 리소스 다운로더가 초기화되었습니다. 저장 위치: {self.download_dir}")
+        print(f"🎉 외부 리소스 다운로더가 초기화되었습니다. 저장 위치: {self.download_dir}")
     
     def _load_existing_files(self):
         """
@@ -70,6 +101,7 @@ class ExternalResourceDownloader:
             for file_path in existing_files:
                 if file_path.is_file():
                     filename = file_path.name
+                    relative_path = str(file_path.relative_to(self.output_dir))
                     
                     # 파일명에서 해시 부분 추출 (마지막 8자리)
                     # 확장자가 있는 경우와 없는 경우 모두 처리
@@ -89,8 +121,9 @@ class ExternalResourceDownloader:
                             if len(url_hash) == 8 and url_hash.isalnum():
                                 # 해시를 기반으로 캐시 키 생성 (실제 URL은 알 수 없으므로 파일명 기반)
                                 cache_key = f"local_file_{url_hash}"
-                                relative_path = str(file_path.relative_to(self.output_dir))
                                 self.download_cache[cache_key] = relative_path
+                                # downloaded_files에도 추가 (URL 매칭을 위해)
+                                self.downloaded_files[cache_key] = relative_path
                                 self.stats['total_skipped'] += 1
                                 logging.debug(f"캐시에 로드: {filename} -> {cache_key}")
             
@@ -99,6 +132,40 @@ class ExternalResourceDownloader:
         else:
             logging.info("기존 다운로드된 파일이 없습니다.")
             print("📁 기존 다운로드된 파일이 없습니다.")
+    
+    def _reconstruct_original_filenames(self):
+        """
+        기존 다운로드된 파일들에서 원본 파일명을 추정하여 매핑을 생성합니다.
+        """
+        if not self.download_dir.exists():
+            return
+        
+        existing_files = list(self.download_dir.glob('*'))
+        reconstructed_count = 0
+        
+        for file_path in existing_files:
+            if file_path.is_file():
+                filename = file_path.name
+                
+                # 파일명에서 원본 파일명 부분 추출 시도
+                if '_' in filename:
+                    parts = filename.split('_')
+                    # 첫 번째 부분이 원본 파일명일 가능성이 높음
+                    potential_original = parts[0]
+                    
+                    # 확장자 확인
+                    if '.' in filename:
+                        ext = os.path.splitext(filename)[1]
+                        potential_original += ext
+                    
+                    # 원본 파일명 매핑에 추가
+                    self.original_filename_mapping[potential_original] = filename
+                    reconstructed_count += 1
+                    logging.debug(f"원본 파일명 추정: {potential_original} -> {filename}")
+        
+        if reconstructed_count > 0:
+            logging.info(f"원본 파일명 매핑 {reconstructed_count}개 재구성 완료")
+            print(f"🔧 원본 파일명 매핑 {reconstructed_count}개 재구성 완료")
     
     def _extract_token_from_url(self, url):
         """
@@ -243,6 +310,16 @@ class ExternalResourceDownloader:
                 filename = self.get_safe_filename(url, content_type)
                 file_path = self.download_dir / filename
                 
+                # 원본 파일명 추출 및 매핑 저장
+                parsed_url = urlparse(url)
+                original_filename = os.path.basename(parsed_url.path)
+                if original_filename:
+                    self.original_filename_mapping[original_filename] = filename
+                    logging.debug(f"원본 파일명 매핑: {original_filename} -> {filename}")
+                
+                print(f"  📝 파일 저장 경로: {file_path.absolute()}")
+                logging.info(f"  📝 파일 저장 경로: {file_path.absolute()}")
+                
                 # 파일이 이미 존재하는지 확인 (다른 URL에서 같은 파일을 다운로드한 경우)
                 if file_path.exists():
                     logging.info(f"  파일이 이미 존재함: {filename}")
@@ -253,14 +330,28 @@ class ExternalResourceDownloader:
                 
                 # 파일 다운로드
                 downloaded_size = 0
+                print(f"  💾 파일 다운로드 시작: {filename}")
+                logging.info(f"  💾 파일 다운로드 시작: {filename}")
+                
                 with open(file_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
                             downloaded_size += len(chunk)
                 
-                logging.info(f"  다운로드 완료: {filename} ({downloaded_size:,} bytes)")
-                print(f"  ✅ 다운로드 완료: {filename} ({downloaded_size:,} bytes)")
+                # 파일 저장 후 존재 확인
+                if file_path.exists():
+                    actual_size = file_path.stat().st_size
+                    print(f"  ✅ 다운로드 완료: {filename} ({downloaded_size:,} bytes)")
+                    print(f"  📊 실제 파일 크기: {actual_size:,} bytes")
+                    print(f"  📍 파일 존재 확인: {file_path.exists()}")
+                    logging.info(f"  ✅ 다운로드 완료: {filename} ({downloaded_size:,} bytes)")
+                    logging.info(f"  📊 실제 파일 크기: {actual_size:,} bytes")
+                    logging.info(f"  📍 파일 존재 확인: {file_path.exists()}")
+                else:
+                    print(f"  ❌ 파일 저장 실패: {filename}")
+                    logging.error(f"  ❌ 파일 저장 실패: {filename}")
+                    return None
                 
                 # 성공 시 캐시에 저장
                 relative_path = str(file_path.relative_to(self.output_dir))
@@ -303,6 +394,55 @@ class ExternalResourceDownloader:
         다운로드되지 않은 경우 None을 반환합니다.
         """
         return self.downloaded_files.get(url) or self.download_cache.get(url)
+    
+    def replace_urls_in_html(self, html_content):
+        """
+        HTML 내용에서 외부 URL을 로컬 경로로 교체합니다.
+        """
+        if not html_content:
+            return html_content
+        
+        # 다운로드된 파일들의 URL을 로컬 경로로 교체
+        for url, local_path in self.downloaded_files.items():
+            if local_path:
+                # URL을 로컬 경로로 교체
+                html_content = html_content.replace(f'href="{url}"', f'href="{local_path}"')
+                html_content = html_content.replace(f"href='{url}'", f"href='{local_path}'")
+        
+        return html_content
+    
+    def match_urls_with_files(self, html_content):
+        """
+        HTML 내용에서 사용되는 URL들을 찾아서 다운로드된 파일들과 매칭합니다.
+        """
+        import re
+        
+        # Slack CDN URL 패턴 찾기
+        slack_url_pattern = r'https://files\.slack\.com/files-pri/[^"\s>]+'
+        urls = re.findall(slack_url_pattern, html_content)
+        
+        print(f"🔍 HTML에서 발견된 Slack URL 수: {len(urls)}")
+        
+        # 각 URL에 대해 다운로드된 파일 찾기
+        for url in urls:
+            # URL에서 파일명 추출
+            parsed_url = urlparse(url)
+            original_filename = os.path.basename(parsed_url.path)
+            
+            if original_filename:
+                # 다운로드된 파일들 중에서 매칭되는 파일 찾기
+                for file_path in self.download_dir.glob('*'):
+                    if file_path.is_file():
+                        filename = file_path.name
+                        
+                        # 파일명에 원본 파일명이 포함되어 있는지 확인
+                        if original_filename in filename or filename.startswith(original_filename.split('.')[0]):
+                            relative_path = str(file_path.relative_to(self.output_dir))
+                            self.downloaded_files[url] = relative_path
+                            print(f"  ✅ URL 매칭: {url} -> {relative_path}")
+                            break
+        
+        print(f"📊 매칭된 URL 수: {len(self.downloaded_files)}")
     
     def download_all_resources(self, messages):
         """
@@ -398,4 +538,70 @@ class ExternalResourceDownloader:
         print(f"📊 성공적으로 다운로드: {downloaded_count}개")
         print(f"📊 다운로드 통계: 시도 {self.stats['total_attempted']}개, 성공 {self.stats['total_success']}개, 실패 {self.stats['total_failed']}개, 스킵 {self.stats['total_skipped']}개")
         
-        return downloaded_count, total_resources 
+        return downloaded_count, total_resources
+    
+    def replace_all_slack_links_in_html(self, html_content, html_file_path=None):
+        """
+        HTML 내 href/src의 Slack 파일 링크를 다운로드된 파일명과 매칭하여 모두 로컬 경로로 치환합니다.
+        html_file_path: HTML 파일의 경로를 전달하여 상대 경로를 올바르게 계산합니다.
+        """
+        import re
+        if not html_content:
+            return html_content
+        
+        # HTML 파일의 위치에 따라 external_resources 경로 결정
+        if html_file_path:
+            html_path = Path(html_file_path)
+            # html_output 기준으로 상대 경로 계산
+            if 'channel' in html_path.parts:
+                # 채널별 페이지: ../../external_resources/
+                external_resources_prefix = "../../external_resources/"
+            else:
+                # 메인 페이지: external_resources/
+                external_resources_prefix = "external_resources/"
+        else:
+            # 기본값
+            external_resources_prefix = "external_resources/"
+        
+        # Slack 파일 URL 패턴 (href/src 모두)
+        slack_url_pattern = r'(href|src)=["\"](https://files\.slack\.com/files-pri/[^"\
+\s>]+)["\
+]'
+        matches = re.findall(slack_url_pattern, html_content)
+        
+        # 다운로드된 파일 목록 준비
+        file_map = {}
+        for file_path in self.download_dir.glob('*'):
+            if file_path.is_file():
+                filename = file_path.name
+                file_map[filename] = external_resources_prefix + filename
+        
+        replaced = 0
+        for attr, url in matches:
+            # URL에서 파일명 추출
+            parsed_url = urlparse(url)
+            original_filename = os.path.basename(parsed_url.path)
+            
+            # 1. 원본 파일명 매핑에서 정확한 매칭 시도
+            if original_filename in self.original_filename_mapping:
+                downloaded_filename = self.original_filename_mapping[original_filename]
+                if downloaded_filename in file_map:
+                    rel_path = file_map[downloaded_filename]
+                    html_content = html_content.replace(f'{attr}="{url}"', f'{attr}="{rel_path}"')
+                    html_content = html_content.replace(f"{attr}='{url}'", f"{attr}='{rel_path}'")
+                    replaced += 1
+                    print(f"  ✅ 정확한 매칭: {original_filename} -> {downloaded_filename}")
+                    continue
+            
+            # 2. 기존 방식으로 부분 매칭 시도
+            for filename, rel_path in file_map.items():
+                if original_filename and (original_filename in filename or filename.startswith(original_filename.split('.')[0])):
+                    # 치환
+                    html_content = html_content.replace(f'{attr}="{url}"', f'{attr}="{rel_path}"')
+                    html_content = html_content.replace(f"{attr}='{url}'", f"{attr}='{rel_path}'")
+                    replaced += 1
+                    print(f"  ⚠️  부분 매칭: {original_filename} -> {filename}")
+                    break
+        
+        print(f"🔗 replace_all_slack_links_in_html: {replaced}개 링크 치환 완료 (경로: {external_resources_prefix})")
+        return html_content 
