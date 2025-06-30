@@ -183,11 +183,25 @@ def main(**kwargs):
 
         freezer.freeze()
 
+        # freeze() 실행 후 external_resources 디렉토리 상태 확인
+        if downloader:
+            external_resources_path = os.path.join(config.output_dir, "external_resources")
+            if os.path.exists(external_resources_path):
+                file_count = len([f for f in os.listdir(external_resources_path) if os.path.isfile(os.path.join(external_resources_path, f))])
+                print(f"🔍 freeze() 후 external_resources 디렉토리 확인: {file_count}개 파일 존재")
+            else:
+                print(f"❌ freeze() 후 external_resources 디렉토리가 삭제되었습니다!")
+                # 다운로더에서 파일 목록 다시 확인
+                if hasattr(downloader, 'download_dir') and downloader.download_dir.exists():
+                    file_count = len([f for f in downloader.download_dir.iterdir() if f.is_file()])
+                    print(f"🔍 다운로더 캐시에서 {file_count}개 파일 확인됨")
+                else:
+                    print(f"❌ 다운로더 캐시도 비어있습니다!")
+
         # HTML 생성 후 외부 링크를 로컬 경로로 수정
         if downloader:
             print("🔗 HTML 파일에서 외부 링크를 로컬 경로로 수정 중...")
             import glob
-            import os
             
             # 모든 HTML 파일 찾기
             html_files = glob.glob(os.path.join(config.output_dir, "**/*.html"), recursive=True)

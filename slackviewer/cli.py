@@ -21,15 +21,54 @@ def cli():
     Actually performs file deletion
     Environment var: SEV_CLEAN_WET (default: false)
     """)
-def clean(wet):
+@click.option("--preserve-external-resources", is_flag=True, default=True, envvar='SEV_PRESERVE_EXTERNAL_RESOURCES', help="""\b
+    Preserve external_resources directory when cleaning
+    Environment var: SEV_PRESERVE_EXTERNAL_RESOURCES (default: true)
+    """)
+def clean(wet, preserve_external_resources):
     if wet:
         if os.path.exists(SLACKVIEWER_TEMP_PATH):
             print("Removing {}...".format(SLACKVIEWER_TEMP_PATH))
+            
+            # external_resources 디렉토리를 보존하려는 경우
+            if preserve_external_resources:
+                # html_output 디렉토리 찾기
+                html_output_dirs = []
+                for root, dirs, files in os.walk(SLACKVIEWER_TEMP_PATH):
+                    for dir_name in dirs:
+                        if dir_name == "html_output":
+                            html_output_path = os.path.join(root, dir_name)
+                            html_output_dirs.append(html_output_path)
+                
+                # 각 html_output 디렉토리에서 external_resources 백업
+                preserved_resources = []
+                for html_output_path in html_output_dirs:
+                    external_resources_path = os.path.join(html_output_path, "external_resources")
+                    if os.path.exists(external_resources_path):
+                        # 임시 위치로 백업
+                        backup_path = external_resources_path + "_backup"
+                        shutil.move(external_resources_path, backup_path)
+                        preserved_resources.append((backup_path, html_output_path))
+                        print(f"Preserving external_resources from {html_output_path}")
+            
+            # 임시 디렉토리 삭제
             shutil.rmtree(SLACKVIEWER_TEMP_PATH)
+            
+            # 백업된 external_resources 복원
+            if preserve_external_resources and preserved_resources:
+                for backup_path, html_output_path in preserved_resources:
+                    if os.path.exists(html_output_path):
+                        restored_path = os.path.join(html_output_path, "external_resources")
+                        shutil.move(backup_path, restored_path)
+                        print(f"Restored external_resources to {html_output_path}")
+                    else:
+                        print(f"Warning: Could not restore external_resources to {html_output_path} (directory does not exist)")
         else:
             print("Nothing to remove! {} does not exist.".format(SLACKVIEWER_TEMP_PATH))
     else:
         print("Run with -w to remove {}".format(SLACKVIEWER_TEMP_PATH))
+        if preserve_external_resources:
+            print("Note: external_resources directories will be preserved by default")
 
 
 @cli.command(help="Generates a single-file printable export for an archive file or directory")

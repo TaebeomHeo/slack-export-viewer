@@ -549,25 +549,46 @@ class ExternalResourceDownloader:
         if not html_content:
             return html_content
         
+        print(f"🔍 replace_all_slack_links_in_html 시작: {html_file_path}")
+        
         # HTML 파일의 위치에 따라 external_resources 경로 결정
         if html_file_path:
             html_path = Path(html_file_path)
-            # html_output 기준으로 상대 경로 계산
-            if 'channel' in html_path.parts:
-                # 채널별 페이지: ../../external_resources/
+            # html_output/channel/ 하위면 ../../external_resources/
+            # 경로에 'html_output', 'channel'이 모두 포함되어 있으면 적용
+            parts = [str(p) for p in html_path.parts]
+            print(f"🔍 HTML 경로 분석: {parts}")
+            if 'html_output' in parts and 'channel' in parts:
                 external_resources_prefix = "../../external_resources/"
+                print(f"🔍 채널 페이지 감지: {external_resources_prefix}")
             else:
-                # 메인 페이지: external_resources/
                 external_resources_prefix = "external_resources/"
+                print(f"🔍 메인 페이지 감지: {external_resources_prefix}")
         else:
-            # 기본값
             external_resources_prefix = "external_resources/"
+            print(f"🔍 기본값 사용: {external_resources_prefix}")
         
-        # Slack 파일 URL 패턴 (href/src 모두)
-        slack_url_pattern = r'(href|src)=["\"](https://files\.slack\.com/files-pri/[^"\
-\s>]+)["\
-]'
-        matches = re.findall(slack_url_pattern, html_content)
+        # 디버깅: 다운로드된 파일 목록 확인
+        downloaded_files = list(self.download_dir.glob('*'))
+        print(f"🔍 다운로드된 파일 수: {len(downloaded_files)}")
+        if downloaded_files:
+            print(f"🔍 첫 번째 파일 예시: {downloaded_files[0].name}")
+        
+        # Slack 파일 URL 패턴 (href/src 모두) - 더 포괄적인 패턴으로 수정
+        slack_url_patterns = [
+            r'(href|src)=["\'](https://files\.slack\.com/files-pri/[^"\'\s>]+)["\']',
+            r'(href|src)=["\'](https://files\.slack\.com/files-tmb/[^"\'\s>]+)["\']',
+            r'(href|src)=["\'](https://files\.slack\.com/[^"\'\s>]+)["\']'
+        ]
+        
+        all_matches = []
+        for pattern in slack_url_patterns:
+            matches = re.findall(pattern, html_content)
+            all_matches.extend(matches)
+        
+        print(f"🔍 HTML에서 발견된 Slack URL 수: {len(all_matches)}")
+        if all_matches:
+            print(f"🔍 첫 번째 URL 예시: {all_matches[0]}")
         
         # 다운로드된 파일 목록 준비
         file_map = {}
@@ -576,11 +597,16 @@ class ExternalResourceDownloader:
                 filename = file_path.name
                 file_map[filename] = external_resources_prefix + filename
         
+        print(f"🔍 파일 매핑 준비 완료: {len(file_map)}개 파일")
+        
         replaced = 0
-        for attr, url in matches:
+        for attr, url in all_matches:
             # URL에서 파일명 추출
             parsed_url = urlparse(url)
             original_filename = os.path.basename(parsed_url.path)
+            
+            print(f"🔍 처리 중인 URL: {url}")
+            print(f"🔍 추출된 파일명: {original_filename}")
             
             # 1. 원본 파일명 매핑에서 정확한 매칭 시도
             if original_filename in self.original_filename_mapping:
@@ -594,6 +620,7 @@ class ExternalResourceDownloader:
                     continue
             
             # 2. 기존 방식으로 부분 매칭 시도
+            matched = False
             for filename, rel_path in file_map.items():
                 if original_filename and (original_filename in filename or filename.startswith(original_filename.split('.')[0])):
                     # 치환
@@ -601,7 +628,28 @@ class ExternalResourceDownloader:
                     html_content = html_content.replace(f"{attr}='{url}'", f"{attr}='{rel_path}'")
                     replaced += 1
                     print(f"  ⚠️  부분 매칭: {original_filename} -> {filename}")
+                    matched = True
                     break
+            
+            if not matched:
+                print(f"  ❌ 매칭 실패: {original_filename}")
         
         print(f"🔗 replace_all_slack_links_in_html: {replaced}개 링크 치환 완료 (경로: {external_resources_prefix})")
+        
+        # 추가: 이미 external_resources/로 시작하는 경로도 수정 (채널 페이지의 경우)
+        if 'html_output' in parts and 'channel' in parts:
+            # external_resources/ -> ../../external_resources/ 치환
+            old_pattern = 'src="external_resources/'
+            new_pattern = 'src="../../external_resources/'
+            additional_replaced = html_content.count(old_pattern)
+            html_content = html_content.replace(old_pattern, new_pattern)
+            
+            old_pattern = "src='external_resources/"
+            new_pattern = "src='../../external_resources/"
+            additional_replaced += html_content.count(old_pattern)
+            html_content = html_content.replace(old_pattern, new_pattern)
+            
+            if additional_replaced > 0:
+                print(f"🔗 추가 치환: {additional_replaced}개 external_resources/ 경로를 ../../external_resources/로 수정")
+        
         return html_content 

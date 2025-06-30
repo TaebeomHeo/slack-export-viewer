@@ -14,6 +14,7 @@
     "axios": "^1.10.0",
     "botbuilder": "^4.17.0-blobs1",
     "botbuilder-teams": "^1.0.0",
-    "dotenv": "^16.5.0"
+    "dotenv": "^16.5.0",
+    "jsdom": "^26.1.0"
   }
 }
