@@ -151,9 +151,164 @@ class MessageTracker {
   }
 }
 
+// 파일 업로드 관리 클래스
+class FileUploadManager {
+  constructor() {
+    this.uploadedFiles = new Map(); // fileName -> shareLink
+    this.filesTrackerFile = 'uploaded_files.json';
+    this.siteName = process.env.SHAREPOINT_SITE_NAME || 'Slack_BackUp';
+    this.slackDataPath = process.env.SLACK_DATA_PATH || './html_output';
+  }
+
+  // 업로드된 파일 기록 로드
+  async loadUploadedFiles() {
+    try {
+      const data = await fs.readFile(this.filesTrackerFile, 'utf-8');
+      const files = JSON.parse(data);
+      this.uploadedFiles = new Map(Object.entries(files));
+      console.log(`📁 ${this.uploadedFiles.size}개의 업로드된 파일 기록을 로드했습니다.`);
+    } catch (error) {
+      console.log('📁 이전 파일 업로드 기록이 없습니다.');
+    }
+  }
+
+  // SharePoint에서 실제 파일 목록 확인
+  async syncWithSharePoint() {
+    try {
+      console.log('🔄 SharePoint 파일 목록과 동기화 중...');
+      const accessToken = await getAccessToken();
+      const siteId = await withTokenRetry(
+        (token) => getSiteId(this.siteName, token),
+        accessToken
+      );
+
+
+      const sharePointFiles = await withTokenRetry(
+        (token) => getSharePointFiles(siteId, token),
+        accessToken
+      );
+
+      console.log(`📊 SharePoint에 ${sharePointFiles.length}개의 파일이 있습니다.`);
+
+      // 로컬 기록과 SharePoint 실제 파일 목록 비교
+      const localFiles = Array.from(this.uploadedFiles.keys());
+      const missingInLocal = sharePointFiles.filter(file => !localFiles.includes(file));
+
+      if (missingInLocal.length > 0) {
+        console.log(`⚠️ 로컬 기록에 없는 SharePoint 파일 ${missingInLocal.length}개 발견`);
+        // 누락된 파일들의 링크를 조회하여 로컬 기록에 추가
+        for (const file of missingInLocal) {
+          try {
+            const shareLink = await withTokenRetry(
+              (token) => getFileShareLink(siteId, file.id, token),
+              accessToken
+            );
+
+            if (shareLink) {
+              this.uploadedFiles.set(file.name, shareLink);
+              console.log(`✅ 파일 링크 복원: ${file.name}`);
+            } else {
+              console.log(`⚠️ 파일 링크 복원 실패: ${file.name} (계속 진행)`);
+            }
+          } catch (error) {
+            console.log(`⚠️ 파일 링크 복원 중 오류 발생: ${file.name} - ${error.message} (계속 진행)`);
+          }
+        }
+      }
+
+    } catch (error) {
+      console.error('❌ SharePoint 동기화 실패:', error.message);
+    }
+  }
+
+  // 업로드된 파일 기록 저장
+  async saveUploadedFiles() {
+    try {
+      const files = Object.fromEntries(this.uploadedFiles);
+      await fs.writeFile(this.filesTrackerFile, JSON.stringify(files, null, 2), 'utf-8');
+      console.log(`💾 ${this.uploadedFiles.size}개의 파일 업로드 기록을 저장했습니다.`);
+    } catch (error) {
+      console.error('❌ 파일 업로드 기록 저장 실패:', error.message);
+    }
+  }
+
+  // 파일이 이미 업로드되었는지 확인
+  isFileUploaded(fileName) {
+    return this.uploadedFiles.has(fileName);
+  }
+
+  // 파일의 SharePoint 링크 가져오기
+  getFileLink(fileName) {
+    return this.uploadedFiles.get(fileName);
+  }
+
+  // 파일을 SharePoint에 업로드
+  async uploadFile(fileName) {
+    try {
+      // 이미 업로드된 파일인지 확인
+      if (this.isFileUploaded(fileName)) {
+        console.log(`⏭️ 파일 "${fileName}" 이미 업로드됨`);
+        return this.getFileLink(fileName);
+      }
+
+      // 파일 경로 구성 - external_resources 폴더에서 찾기
+      const filePath = path.join(this.slackDataPath, 'external_resources', fileName);
+
+      // 파일 존재 확인
+      try {
+        await fs.access(filePath);
+      } catch (error) {
+        console.log(`⚠️ 파일을 찾을 수 없음: ${filePath}`);
+        return null;
+      }
+
+      console.log(`📤 파일 업로드 중: ${fileName}`);
+
+      // SharePoint에 업로드
+      const accessToken = await getAccessToken();
+      const siteId = await withTokenRetry(
+        (token) => getSiteId(this.siteName, token),
+        accessToken
+      );
+
+      const fileBuffer = await fs.readFile(filePath);
+      const shareLink = await withTokenRetry(
+        (token) => uploadAndGetLink(siteId, fileName, fileBuffer, token),
+        accessToken
+      );
+
+      // 업로드 성공 시 기록에 추가
+      this.uploadedFiles.set(fileName, shareLink);
+      console.log(`✅ 파일 업로드 완료: ${fileName}`);
+
+      return shareLink;
+
+    } catch (error) {
+      console.log(`⚠️ 파일 업로드 실패 "${fileName}": ${error.message}`);
+      return null;
+    }
+  }
+
+  // 여러 파일을 배치로 업로드
+  async uploadFiles(fileNames) {
+    const results = [];
+    for (const fileName of fileNames) {
+      const link = await this.uploadFile(fileName);
+      results.push({ fileName, link });
+    }
+    return results;
+  }
+
+  // 업로드된 파일 수 반환
+  getUploadedCount() {
+    return this.uploadedFiles.size;
+  }
+}
+
 // 전역 인스턴스들
 const rateLimiter = new TeamsRateLimiter();
 const messageTracker = new MessageTracker();
+const fileUploadManager = new FileUploadManager();
 
 // 종료 핸들러 함수
 const gracefulShutdown = async (signal) => {
@@ -163,6 +318,10 @@ const gracefulShutdown = async (signal) => {
     // 전송 기록 저장
     await messageTracker.saveSentMessages();
     console.log('💾 전송 기록이 저장되었습니다.');
+
+    // 파일 업로드 기록 저장
+    await fileUploadManager.saveUploadedFiles();
+    console.log('💾 파일 업로드 기록이 저장되었습니다.');
 
     console.log('👋 프로그램을 종료합니다.');
     process.exit(0);
@@ -187,8 +346,236 @@ process.on('unhandledRejection', async (reason, promise) => {
   await gracefulShutdown('unhandledRejection');
 });
 
+// SharePoint 파일 업로드 관련 함수들
+let cachedToken = null;
+let tokenExpiry = null;
+
+const getAccessToken = async () => {
+  // 토큰이 유효하면 캐시된 토큰 반환
+  if (cachedToken && tokenExpiry && new Date() < tokenExpiry) {
+    return cachedToken;
+  }
+
+  const tenantId = process.env.TENANT_ID;
+  const clientId = process.env.CLIENT_ID;
+  const clientSecret = process.env.CLIENT_SECRET;
+
+  // 환경변수 검증
+  if (!tenantId || !clientId || !clientSecret) {
+    throw new Error('SharePoint 환경변수가 설정되지 않았습니다. .env 파일을 확인해주세요.');
+  }
+
+  const response = await axios.post(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: 'https://graph.microsoft.com/.default',
+      grant_type: 'client_credentials'
+    }),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+
+  // 토큰 캐시 (만료 5분 전에 갱신)
+  cachedToken = response.data.access_token;
+  const expiresIn = response.data.expires_in || 3600; // 기본 1시간
+  tokenExpiry = new Date(Date.now() + (expiresIn - 300) * 1000); // 5분 전에 만료
+
+  return cachedToken;
+};
+
+// 토큰 재발급 및 재시도 래퍼 함수
+const withTokenRetry = async (apiCall, accessToken) => {
+  try {
+    return await apiCall(accessToken);
+  } catch (error) {
+    if (error.response && error.response.status === 401) {
+      console.log('토큰 만료 감지, 토큰 재발급 중...');
+      // 토큰 캐시 초기화
+      cachedToken = null;
+      tokenExpiry = null;
+      // 새 토큰으로 재시도
+      const newToken = await getAccessToken();
+      return await apiCall(newToken);
+    }
+    throw error;
+  }
+};
+
+// SharePoint 사이트 ID 획득
+const getSiteId = async (siteName, accessToken) => {
+  const response = await axios.get(
+    `https://graph.microsoft.com/v1.0/sites/agenergycorp.sharepoint.com:/sites/${siteName}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  return response.data.id;
+};
+
+// SharePoint에 파일 업로드 및 링크 생성
+const uploadAndGetLink = async (siteId, fileName, fileBuffer, accessToken) => {
+  // 파일명만 추출 (경로 제거)
+  const baseFileName = path.basename(fileName);
+
+  // Slack_BackUp 채널(폴더) 안에 파일 업로드
+  const uploadResponse = await axios.put(
+    `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/root:/Slack_BackUp/${baseFileName}:/content`,
+    fileBuffer,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/octet-stream'
+      }
+    }
+  );
+
+  // 공유 링크 생성
+  const itemId = uploadResponse.data.id;
+  const linkResponse = await axios.post(
+    `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${itemId}/createLink`,
+    { type: 'view', scope: 'organization' },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  return linkResponse.data.link.webUrl;
+};
+
+// SharePoint에서 파일 목록 조회
+const getSharePointFiles = async (siteId, accessToken) => {
+  try {
+    const response = await axios.get(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/root:/Slack_BackUp:/children`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    return response.data.value.map(item => ({
+      name: item.name,
+      id: item.id,
+      webUrl: item.webUrl
+    }));
+  } catch (error) {
+    console.log('SharePoint 파일 목록 조회 실패, 빈 배열 반환:', error.message);
+    return [];
+  }
+};
+
+// SharePoint에서 파일의 공유 링크 조회
+const getFileShareLink = async (siteId, fileId, accessToken) => {
+  try {
+    const response = await axios.get(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${fileId}?$select=id,@microsoft.graph.downloadUrl`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    // 공유 링크 생성
+    const linkResponse = await axios.post(
+      `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/items/${fileId}/createLink`,
+      { type: 'view', scope: 'organization' },
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    return linkResponse.data.link.webUrl;
+  } catch (error) {
+    console.error(`파일 링크 조회 실패: ${error.message}`);
+    return null;
+  }
+};
+
+// HTML에서 파일 참조 추출 함수
+const extractFileReferences = (htmlElement) => {
+  const dom = new JSDOM(htmlElement);
+  const document = dom.window.document;
+
+  const fileRefs = [];
+
+  // 1. user_icon 클래스의 이미지 처리 (프로필 이미지)
+  console.log('🔍 user_icon 검색 중...');
+
+  // 다양한 방법으로 user_icon 찾기
+  let userIconElement = document.querySelector('img.user_icon');
+  if (!userIconElement) {
+    userIconElement = document.querySelector('img[class*="user_icon"]');
+  }
+  if (!userIconElement) {
+    userIconElement = document.querySelector('img[class="user_icon"]');
+  }
+  if (!userIconElement) {
+    // 모든 img 태그에서 user_icon 클래스를 가진 것 찾기
+    const allImages = document.querySelectorAll('img');
+    for (const img of allImages) {
+      const className = img.getAttribute('class');
+      if (className && className.includes('user_icon')) {
+        userIconElement = img;
+        break;
+      }
+    }
+  }
+
+  if (userIconElement) {
+    console.log('✅ user_icon 요소 발견');
+    const userIconSrc = userIconElement.getAttribute('src');
+    const userIconClass = userIconElement.getAttribute('class');
+    console.log(`🔗 user_icon src: ${userIconSrc}`);
+    console.log(`🏷️ user_icon class: ${userIconClass}`);
+    if (userIconSrc && userIconSrc.includes('external_resources/')) {
+      const fileName = userIconSrc.split('external_resources/')[1];
+      console.log(`📁 추출된 파일명: ${fileName}`);
+      if (fileName) {
+        fileRefs.push({
+          type: 'user_icon',
+          originalName: fileName,
+          actualFileName: fileName,
+          order: 0 // user_icon은 가장 먼저
+        });
+        console.log('✅ user_icon 파일 참조 추가됨');
+      }
+    } else {
+      console.log('⚠️ user_icon src가 external_resources/를 포함하지 않음');
+    }
+  } else {
+    console.log('❌ user_icon 요소를 찾을 수 없음');
+    // 모든 img 태그 확인
+    const allImages = document.querySelectorAll('img');
+    console.log(`📊 총 ${allImages.length}개의 img 태그 발견`);
+    allImages.forEach((img, index) => {
+      const src = img.getAttribute('src');
+      const className = img.getAttribute('class');
+      console.log(`  ${index + 1}. src: ${src}, class: ${className}`);
+    });
+  }
+
+  // 2. message-upload 클래스에서 파일 첨부 추출
+  const uploadElements = document.querySelectorAll('.message-upload');
+  console.log(`📁 message-upload 요소 ${uploadElements.length}개 발견`);
+  uploadElements.forEach((uploadElement, index) => {
+    // link-title에서 원본 파일명과 업로드 대상 파일 추출
+    const linkTitleElement = uploadElement.querySelector('.link-title a');
+    if (linkTitleElement) {
+      const originalFileName = linkTitleElement.textContent.trim();
+      const uploadFilePath = linkTitleElement.getAttribute('href');
+
+      if (uploadFilePath && uploadFilePath.includes('external_resources/')) {
+        const actualFileName = uploadFilePath.split('external_resources/')[1];
+        if (actualFileName) {
+          fileRefs.push({
+            type: 'upload_file',
+            originalName: originalFileName,
+            actualFileName: actualFileName,
+            order: index + 1
+          });
+        }
+      }
+    }
+  });
+
+  console.log(`📋 총 ${fileRefs.length}개의 파일 참조 추출됨`);
+  fileRefs.forEach((ref, index) => {
+    console.log(`  ${index + 1}. ${ref.type}: ${ref.originalName}`);
+  });
+
+  return fileRefs;
+};
+
 // HTML 요소를 Teams 카드로 변환하는 함수
-const convertHtmlToTeamsCard = (htmlElement) => {
+const convertHtmlToTeamsCard = async (htmlElement) => {
   // DOM 파싱
   const dom = new JSDOM(htmlElement);
   const document = dom.window.document;
@@ -227,26 +614,102 @@ const convertHtmlToTeamsCard = (htmlElement) => {
 
   const info = extractInfo();
 
-  // Teams 카드 생성
+  // 파일 참조 추출
+  const fileRefs = extractFileReferences(htmlElement);
+  const uploadedFiles = [];
+  let userIconFile = null;
+
+  if (fileRefs.length > 0) {
+    console.log(`📁 메시지에서 ${fileRefs.length}개의 파일 참조 발견`);
+
+    // 1단계: 모든 파일들을 먼저 업로드
+    console.log('🔄 파일 업로드 시작...');
+    for (const fileRef of fileRefs) {
+      try {
+        // user_icon은 별도 처리 (프로필 이미지) - 현재 비활성화 (SharePoint 링크가 private이라 Teams 카드에서 표시 불가)
+        if (fileRef.type === 'user_icon') {
+          console.log(`👤 사용자 아이콘 발견: ${fileRef.originalName} (Teams 카드에서는 기본 아이콘 사용)`);
+          // SharePoint 링크는 private이라 Teams 카드의 ActivityImage로 사용할 수 없음
+          // 나중에 Base64 인코딩이나 공개 호스팅 서비스 사용 고려
+          continue;
+        }
+
+        // upload_file만 Teams 카드에 표시
+        if (fileRef.type === 'upload_file') {
+          console.log(`📤 파일 업로드 중: ${fileRef.originalName}`);
+          const shareLink = await fileUploadManager.uploadFile(fileRef.actualFileName);
+          if (shareLink) {
+            uploadedFiles.push({
+              type: fileRef.type,
+              originalName: fileRef.originalName,
+              actualFileName: fileRef.actualFileName,
+              link: shareLink,
+              order: fileRef.order
+            });
+            console.log(`✅ 파일 업로드 완료: ${fileRef.originalName}`);
+          } else {
+            console.log(`⚠️ 파일 업로드 실패: ${fileRef.originalName} (${fileRef.actualFileName}) (계속 진행)`);
+          }
+        }
+      } catch (error) {
+        console.log(`⚠️ 파일 업로드 중 오류 발생: ${fileRef.originalName} (${fileRef.actualFileName}) - ${error.message} (계속 진행)`);
+      }
+    }
+    console.log('✅ 모든 파일 업로드 완료');
+  }
+
+  // 2단계: 업로드된 파일들을 바탕으로 Teams 카드 생성
+  console.log('🔄 Teams 카드 생성 중...');
+
+  // userIconFile 상태 디버깅
+  console.log(`🔍 userIconFile 상태: ${userIconFile ? '설정됨' : 'null'}`);
+  if (userIconFile) {
+    console.log(`🔍 userIconFile.link: ${userIconFile.link}`);
+  }
+
   const card = {
     "@type": "MessageCard",
     "@context": "http://schema.org/extensions",
     "themeColor": "0076D7",
     "summary": `${info.username}의 메시지`,
+    "activityImage": "https://img.icons8.com/color/48/000000/user.png",
     "sections": [
       {
-        "activityTitle": `${info.isReply ? '↳ ' : ''}**${info.username}** (${info.time})`,
-        "activitySubtitle": info.isReply ? `    ${info.message}` : info.message,
-        "activityImage": "https://img.icons8.com/color/48/000000/user.png"
+        "activityTitle": `${info.isReply ? '↳ ' : ''}**${info.username}** (${info.time})`
       }
     ]
   };
 
-  // 파일 첨부가 있는 경우
-  if (info.files.length > 0) {
-    const facts = info.files.map((file, index) => ({
-      "name": `📎 파일 ${index + 1}`,
-      "value": info.isReply ? `    ${file}` : file
+  // 메시지가 있고 비어있지 않은 경우에만 activitySubtitle 추가
+  if (info.message && info.message.trim() !== '') {
+    card.sections[0].activitySubtitle = info.message;
+  }
+
+  // 카드 생성 후 activityImage 확인
+  console.log('📋 Teams 카드 내용:');
+  console.log(`  - ActivityImage: ${card.activityImage}`);
+  console.log(`  - ActivityTitle: ${card.sections[0].activityTitle}`);
+  if (card.sections[0].activitySubtitle) {
+    console.log(`  - ActivitySubtitle: ${card.sections[0].activitySubtitle}`);
+  } else {
+    console.log(`  - ActivitySubtitle: [메시지 없음]`);
+  }
+  if (card.sections[0].facts) {
+    console.log(`  - Facts 개수: ${card.sections[0].facts.length}`);
+  }
+
+  // 사용자 아이콘 사용 여부 로그
+  console.log(`🖼️ Teams 카드에 기본 아이콘 사용`);
+  console.log(`🖼️ ActivityImage URL: https://img.icons8.com/color/48/000000/user.png`);
+
+  // 업로드된 파일이 있는 경우
+  if (uploadedFiles.length > 0) {
+    // 순서대로 정렬
+    uploadedFiles.sort((a, b) => a.order - b.order);
+
+    const facts = uploadedFiles.map((file, index) => ({
+      "name": `📎 파일 ${file.order}`,
+      "value": `[${file.originalName}](${file.link})`
     }));
 
     card.sections[0].facts = facts;
@@ -259,7 +722,7 @@ const convertHtmlToTeamsCard = (htmlElement) => {
     }
     card.sections[0].facts.push({
       "name": "👍 반응",
-      "value": info.isReply ? `    ${info.reaction}` : info.reaction
+      "value": info.reaction
     });
   }
 
@@ -279,7 +742,7 @@ const sendCardToTeams = async (card, retryCount = 0) => {
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
-    console.log(`📤 요청 전송 중... (재시도: ${retryCount}/${maxRetries})`);
+    console.log('📤 요청 전송 중... (재시도: 0/3)');
 
     const response = await axios.post(webhookUrl, card, {
       headers: {
@@ -382,7 +845,7 @@ const retryFailedMessages = async (failedMessages, originalFilePath) => {
     }
 
     const container = messageContainers[containerIndex];
-    const { card, messageId } = convertHtmlToTeamsCard(container.outerHTML);
+    const { card, messageId } = await convertHtmlToTeamsCard(container.outerHTML);
 
     console.log(`\n🔄 메시지 ${failedMsg.index} 재전송 중...`);
     if (messageId) {
@@ -461,6 +924,10 @@ const processHtmlFile = async (filePath, options = {}) => {
       messageTracker.clearAll();
     }
 
+    // 파일 업로드 기록 로드 및 SharePoint 동기화
+    await fileUploadManager.loadUploadedFiles();
+    await fileUploadManager.syncWithSharePoint();
+
     // 통계 추적
     let successCount = 0;
     let failureCount = 0;
@@ -473,8 +940,11 @@ const processHtmlFile = async (filePath, options = {}) => {
       const container = messageContainers[i];
       const isReply = container.classList.contains('reply') || container.querySelector('.reply') !== null;
 
-      // 메시지 정보 추출
-      const { card, messageId } = convertHtmlToTeamsCard(container.outerHTML);
+      // 메시지 ID 추출 (중복 체크용)
+      const tempDom = new JSDOM(container.outerHTML);
+      const tempDocument = tempDom.window.document;
+      const messageContainer = tempDocument.querySelector('.message-container');
+      const messageId = messageContainer ? messageContainer.id || messageContainer.querySelector('[id]')?.id : null;
 
       // 중복 체크 (--force 옵션이 없을 때만)
       if (!options.force && messageId && messageTracker.isMessageSent(messageId)) {
@@ -488,6 +958,10 @@ const processHtmlFile = async (filePath, options = {}) => {
         console.log(`🆔 메시지 ID: ${messageId}`);
       }
       console.log(`📊 현재 전송된 메시지: ${messageTracker.getSentCount()}개`);
+      console.log(`📁 현재 업로드된 파일: ${fileUploadManager.getUploadedCount()}개`);
+
+      // 메시지 정보 추출 (파일 업로드 + 카드 생성)
+      const { card, messageId: extractedMessageId } = await convertHtmlToTeamsCard(container.outerHTML);
 
       const result = await sendCardToTeams(card);
 
@@ -496,8 +970,8 @@ const processHtmlFile = async (filePath, options = {}) => {
         successCount++;
 
         // 성공한 메시지 ID 기록
-        if (messageId) {
-          messageTracker.markMessageAsSent(messageId);
+        if (extractedMessageId) {
+          messageTracker.markMessageAsSent(extractedMessageId);
         }
 
         // 주기적으로 전송 기록 저장
@@ -523,7 +997,7 @@ const processHtmlFile = async (filePath, options = {}) => {
         failureCount++;
         failedMessages.push({
           index: i + 1,
-          messageId: messageId,
+          messageId: extractedMessageId,
           username: card.sections[0].activityTitle,
           error: result.error,
           status: result.status
@@ -546,6 +1020,7 @@ const processHtmlFile = async (filePath, options = {}) => {
     console.log(`❌ 실패: ${failureCount}개`);
     console.log(`⏭️ 건너뜀: ${skippedCount}개`);
     console.log(`📈 성공률: ${((successCount / (successCount + failureCount)) * 100).toFixed(1)}%`);
+    console.log(`📁 업로드된 파일: ${fileUploadManager.getUploadedCount()}개`);
 
     if (failedMessages.length > 0) {
       console.log('\n❌ 실패한 메시지 목록:');
@@ -582,7 +1057,7 @@ const sendHtmlElement = async (htmlElement) => {
     console.log('🔄 HTML 요소를 Teams 카드로 변환 중...');
 
     // HTML을 Teams 카드로 변환
-    const { card, messageId } = convertHtmlToTeamsCard(htmlElement);
+    const { card, messageId } = await convertHtmlToTeamsCard(htmlElement);
 
     if (messageId) {
       console.log(`🆔 메시지 ID: ${messageId}`);
@@ -638,6 +1113,13 @@ const main = async () => {
     console.log('\n옵션:');
     console.log('  --force    : 모든 메시지를 처음부터 전송 (중복 체크 무시)');
     console.log('  --example  : 예시 HTML 요소 전송');
+    console.log('\n환경변수 설정 (.env 파일):');
+    console.log('  WEB_HOOK_URL=your_teams_webhook_url');
+    console.log('  TENANT_ID=your_tenant_id');
+    console.log('  CLIENT_ID=your_client_id');
+    console.log('  CLIENT_SECRET=your_client_secret');
+    console.log('  SHAREPOINT_SITE_NAME=Slack_BackUp');
+    console.log('  SLACK_DATA_PATH=./html_output');
     console.log('\n또는 직접 HTML 요소를 전송하려면:');
     console.log('node htmlToTeamsCard.js --example');
     return;
